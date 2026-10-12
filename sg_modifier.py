@@ -60,6 +60,30 @@ MAX_RESULTS = 2_000_000        # 候选地址上限
 MAX_SHOW_ROWS = 1000           # 列表最多显示行数
 SNAPSHOT_LIMIT = 3 * 1024 * 1024 * 1024  # 未知初始值快照上限 3GB
 
+# ---- 资源速查表（源码级考证，供向导使用）----
+# 名称: (搜索建议类型, 游戏内获取方式提示)
+RESOURCES = {
+    "捕鱼积分":        ("4字节整数", "钓鱼/捕鱼活动获得积分时变化"),
+    "魔化精粹":        ("4字节整数", "分解魔化秘藏/商店获得时变化"),
+    "扭蛋卷":          ("4字节整数", "获得/使用扭蛋卷时变化"),
+    "圣物碎片":        ("4字节整数", "通关掉落/领取圣物碎片时变化"),
+    "开炮秘钥":        ("4字节整数", "幻兽抽卡券，抽一次/获得时变化"),
+    "神装宝箱5":       ("4字节整数", "开/获得5级神装宝箱时变化"),
+    "神装永久重铸锤":  ("4字节整数", "获得/使用重铸锤时变化"),
+    "神器重铸锤":      ("4字节整数", "获得/使用神器重铸锤时变化"),
+    "神器洗练锤":      ("4字节整数", "获得/使用洗练锤时变化"),
+    "强者精粹":        ("4字节整数", "获得/消耗强者精粹时变化"),
+    "深渊之证":        ("4字节整数", "获得/消耗深渊之证时变化"),
+    "贵族积分":        ("4字节整数", "VIP消费/领取贵族积分时变化"),
+    "BOSS钥匙":        ("4字节整数", "获得/使用BOSS钥匙时变化"),
+    "超级圣物图鉴金币": ("4字节整数", "幻兽图鉴金币获得时变化"),
+    "超级圣物图鉴银币": ("4字节整数", "幻兽图鉴银币获得时变化"),
+    "金币(局内)":      ("4字节整数", "打怪掉金币时变化"),
+    "木材(局内)":      ("4字节整数", "砍树/获得木材时变化"),
+    "杀敌数(局内)":    ("4字节整数", "每杀一个怪+1，适合变大过滤"),
+    "英雄攻击力(局内)": ("4字节整数", "升级/买装备攻击变化"),
+}
+
 if IS_WIN:
     class MBI(ctypes.Structure):
         _fields_ = [
@@ -448,6 +472,7 @@ class App(tk.Tk):
         self.proc_combo.pack(side="left", padx=4)
         ttk.Button(top, text="刷新列表", command=self._refresh_processes).pack(side="left", padx=2)
         ttk.Button(top, text="附加进程", command=self._attach).pack(side="left", padx=6)
+        ttk.Button(top, text="🧭 资源定位向导", command=self._open_wizard).pack(side="left", padx=6)
         self.attach_label = ttk.Label(top, text="未附加", foreground="#b00")
         self.attach_label.pack(side="left", padx=10)
 
@@ -822,6 +847,24 @@ class App(tk.Tk):
                 f"写入 {ok} 条，跳过 {len(skip)} 条。\n跳过的条目地址可能已变化，"
                 f"请在游戏里重新搜索定位后再保存预设。\n\n" + "\n".join(skip[:10]))
 
+    # ---------- 资源定位向导 ----------
+    def _open_wizard(self):
+        if not self.proc:
+            messagebox.showwarning(APP_TITLE, "请先附加进程再使用向导")
+            return
+        WizardDialog(self)
+
+    def _wizard_add_entry(self, name, addr, tn):
+        """向导回调：定位成功，加入地址表并提示保存预设"""
+        self._add_entry(name, addr, tn, "")
+        self.log(f"向导定位成功: {name} @ {hex(addr)} 已加入地址表")
+        if messagebox.askyesno(APP_TITLE,
+                f"{name} 定位成功 @ {hex(addr)}！\n\n"
+                f"现在保存到预设吗？（保存后下次进图可一键改写）\n"
+                f"预设名默认用资源名，当前地址表其他条目也会一并保存。"):
+            self.preset_var.set(name)
+            self._save_preset()
+
     # ---------- 冻结线程 ----------
     def _start_freezer(self):
         def loop():
@@ -837,6 +880,176 @@ class App(tk.Tk):
                     except Exception:
                         pass
         threading.Thread(target=loop, daemon=True).start()
+
+
+class WizardDialog(tk.Toplevel):
+    """资源定位向导：选资源 → 输当前值首扫 → 变化后输新值重扫 → 循环到收敛 → 入表存预设"""
+
+    def __init__(self, app):
+        super().__init__(app)
+        self.app = app
+        self.title("资源定位向导")
+        self.geometry("560x420")
+        self.resizable(False, False)
+        self.resource_name = None
+        self.step_count = 0
+
+        pad = {"padx": 10, "pady": 4}
+        ttk.Label(self, text="① 选择要定位的资源：", font=("", 10, "bold")).pack(anchor="w", **pad)
+        row0 = ttk.Frame(self); row0.pack(anchor="w", padx=10)
+        self.res_var = tk.StringVar()
+        names = list(RESOURCES.keys())
+        self.res_combo = ttk.Combobox(row0, textvariable=self.res_var, values=names,
+                                      width=20, state="readonly")
+        self.res_combo.pack(side="left")
+        self.res_combo.bind("<<ComboboxSelected>>", lambda e: self._on_pick())
+        self.tip_label = ttk.Label(self, text="", foreground="#06c", wraplength=520, justify="left")
+        self.tip_label.pack(anchor="w", padx=10)
+
+        ttk.Separator(self).pack(fill="x", pady=6)
+        ttk.Label(self, text="② 按提示操作后，输入当前数值点对应按钮：", font=("", 10, "bold")).pack(anchor="w", **pad)
+        row1 = ttk.Frame(self); row1.pack(anchor="w", padx=10)
+        ttk.Label(row1, text="数值：").pack(side="left")
+        self.val_var = tk.StringVar()
+        self.val_entry = ttk.Entry(row1, textvariable=self.val_var, width=16)
+        self.val_entry.pack(side="left", padx=4)
+        self.btn_first = ttk.Button(row1, text="首扫(当前值)", command=self._first, state="disabled")
+        self.btn_first.pack(side="left", padx=2)
+        self.btn_next = ttk.Button(row1, text="重扫(变化后)", command=self._next, state="disabled")
+        self.btn_next.pack(side="left", padx=2)
+        self.btn_done = ttk.Button(row1, text="✔ 就这个，加入地址表", command=self._finish, state="disabled")
+        self.btn_done.pack(side="left", padx=6)
+        self.btn_done_p = ttk.Button(row1, text="✔ 入表+存预设", command=lambda: self._finish(True), state="disabled")
+        self.btn_done_p.pack(side="left", padx=2)
+
+        self.status_var = tk.StringVar(value="等待选择资源...")
+        ttk.Label(self, textvariable=self.status_var, foreground="#070").pack(anchor="w", padx=10, pady=4)
+        self.cand_var = tk.StringVar(value="")
+        ttk.Label(self, textvariable=self.cand_var, foreground="#555").pack(anchor="w", padx=10)
+
+        ttk.Separator(self).pack(fill="x", pady=4)
+        ttk.Label(self, text="使用说明：", font=("", 9, "bold")).pack(anchor="w", padx=10)
+        for line in [
+            "1. 选资源 → 记下提示里说的操作方式 → 在游戏里看当前数值是多少",
+            "2. 填当前数值 → 点【首扫】（可能要等几十秒，全内存搜索）",
+            "3. 回游戏按提示操作让数值变化（如获得一次积分）",
+            "4. 填变化后的新值 → 点【重扫】；重复 3~4 直到候选收敛到很少",
+            "5. 点【入表+存预设】→ 以后进图直接用预设一键改写这个值",
+            "提示：数值大且唯一时最准；若收敛不到个位数，试试换类型(浮点/8字节)重开向导",
+        ]:
+            ttk.Label(self, text="· " + line, foreground="#444").pack(anchor="w", padx=16)
+
+        self.transient(app)
+        self.grab_set()
+
+    def _on_pick(self):
+        self.resource_name = self.res_var.get()
+        _, tip = RESOURCES[self.resource_name]
+        self.tip_label.config(text=f"提示：{tip}")
+        self.btn_first.config(state="normal")
+        self.status_var.set("已选择，请在游戏里查看当前数值并填入")
+        self.step_count = 0
+
+    def _check(self):
+        p = self.app.proc
+        if not p or not p.is_alive():
+            messagebox.showerror("资源定位向导", "进程已断开，请重新附加")
+            return False
+        return True
+
+    def _first(self):
+        if not self._check():
+            return
+        text = self.val_var.get().strip()
+        try:
+            int(text)
+        except ValueError:
+            messagebox.showwarning("资源定位向导", "请输入整数数值")
+            return
+        tn = RESOURCES[self.resource_name][0]
+        self.btn_first.config(state="disabled")
+        self.status_var.set("首次扫描中...（可能几十秒，别关游戏别关工具）")
+        self.app.log(f"[向导] {self.resource_name} 首扫 精确值={text} ({tn})")
+
+        def work():
+            try:
+                self.app.scanner.first_scan_exact(self.app.proc, tn, text)
+            except Exception as e:
+                self.app.log(f"[向导] 首扫出错: {e!r}")
+            self.after(0, self._first_done)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _first_done(self):
+        n = len(self.app.scanner.candidates or [])
+        self.cand_var.set(f"候选地址: {n:,}")
+        self.btn_next.config(state="normal")
+        if n == 0:
+            self.status_var.set("首扫 0 命中！数值类型不对（试试向导重开换浮点/8字节），或值有缩放")
+            self.btn_first.config(state="normal")
+            return
+        if n == 1:
+            self.status_var.set("首扫直接唯一命中！直接点【入表+存预设】")
+            self._set_finishable()
+            return
+        self.status_var.set("首扫完成 → 回游戏让数值变化 → 填新值点【重扫】")
+
+    def _next(self):
+        if not self._check():
+            return
+        text = self.val_var.get().strip()
+        try:
+            int(text)
+        except ValueError:
+            messagebox.showwarning("资源定位向导", "请输入变化后的整数数值")
+            return
+        self.btn_next.config(state="disabled")
+        self.status_var.set("重扫中...")
+
+        def work():
+            try:
+                self.app.scanner.cache_last_values(self.app.proc)
+                self.app.scanner.rescan(self.app.proc, "精确值", text)
+            except Exception as e:
+                self.app.log(f"[向导] 重扫出错: {e!r}")
+            self.after(0, self._next_done)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _next_done(self):
+        n = len(self.app.scanner.candidates or [])
+        self.cand_var.set(f"候选地址: {n:,}")
+        self.btn_next.config(state="normal")
+        self.step_count += 1
+        if n == 0:
+            self.status_var.set("重扫 0 命中：新值填错了？点【重扫】前确认游戏里数值真的变了")
+        elif n == 1:
+            self.status_var.set("唯一命中！点【入表+存预设】完成定位")
+            self._set_finishable()
+        elif n <= 5:
+            self.status_var.set(f"还剩 {n} 个候选：继续让数值变化再重扫一次，或先逐个试写入")
+        else:
+            self.status_var.set(f"还剩 {n:,} 个：继续 ③变化→④重扫 的循环，越扫越少")
+
+    def _set_finishable(self):
+        for b in (self.btn_done, self.btn_done_p):
+            b.config(state="normal")
+
+    def _finish(self, save_preset=False):
+        cand = self.app.scanner.candidates or []
+        if len(cand) != 1:
+            messagebox.showinfo("资源定位向导",
+                f"当前有 {len(cand)} 个候选，只有唯一命中才能安全入表。\n"
+                f"继续让数值变化并重扫，直到只剩 1 个。")
+            return
+        addr = cand[0]
+        tn = self.app.scanner.type_name
+        # 先入表
+        self.app._add_entry(self.resource_name, addr, tn, "")
+        self.app.log(f"[向导] {self.resource_name} 定位成功 @ {hex(addr)} 已加入地址表")
+        # 需要时直接保存为预设（含地址表已有条目）
+        if save_preset:
+            self.app.preset_var.set(self.resource_name)
+            self.app._save_preset()
+        self.destroy()
 
 
 def main():
